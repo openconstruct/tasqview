@@ -1,0 +1,16 @@
+[package]
+name = "tview"
+version = "0.1.0"
+edition = "2021"
+description = "Win95-style terminal multiplexer for the Linux console"
+
+[dependencies]
+vt100 = "0.16"
+nix = { version = "0.30", default-features = false, features = ["term", "process", "signal", "poll"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
