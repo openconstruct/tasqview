@@ -9,7 +9,9 @@ impl Battery {
     pub fn new() -> Option<Self> {
         let dir = fs::read_dir("/sys/class/power_supply").ok()?;
         for entry in dir.flatten() {
-            let name = entry.file_name().into_string().ok()?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             if name.starts_with("BAT") {
                 let path = format!("/sys/class/power_supply/{name}");
                 if Path::new(&format!("{path}/capacity")).exists() {

@@ -33,6 +33,7 @@ struct App {
     active: usize,
     inptr: input::Parser,
     sel: selection::Sel,
+    keysel: Option<KeySel>,
     clip: clipboard::Clipboard,
     batt: Option<battery::Battery>,
     on_console: bool,
@@ -95,6 +96,7 @@ impl App {
             active: 0,
             inptr: input::Parser::new(),
             sel: selection::Sel::default(),
+            keysel: None,
             clip: clipboard::Clipboard::default(),
             batt: battery::Battery::new(),
             on_console,
@@ -261,6 +263,19 @@ impl App {
     }
 
     fn on_event(&mut self, ev: input::Event) {
+        if self.keysel.is_some() {
+            match ev {
+                input::Event::Up => self.keysel_move(-1, 0),
+                input::Event::Down => self.keysel_move(1, 0),
+                input::Event::Left => self.keysel_move(0, -1),
+                input::Event::Right => self.keysel_move(0, 1),
+                input::Event::Byte(0x0d) => self.keysel_confirm(),
+                input::Event::Esc => self.keysel_cancel(),
+                _ => {}
+            }
+            return;
+        }
+
         // Bytes destined for the focused session.
         let mut wbuf: Vec<u8> = Vec::new();
 
@@ -273,6 +288,7 @@ impl App {
                         CtrlAction::NewSession => self.new_session(),
                         CtrlAction::CloseSession => self.close_active(),
                         CtrlAction::Quit => self.quit = true,
+                        CtrlAction::ToggleSelect => self.toggle_select_mode(),
                     }
                     return;
                 }
@@ -335,8 +351,7 @@ impl App {
             }
             _ => {
                 if !self.sessions.is_empty() {
-                    let scr = self.sessions[self.active].parser.screen().clone();
-                    let kb = key_bytes(&scr, &ev);
+                    let kb = key_bytes(self.sessions[self.active].parser.screen(), &ev);
                     wbuf.extend_from_slice(&kb);
                 }
             }
@@ -397,6 +412,13 @@ impl App {
                     None
                 }
             }
+            0x13 => {
+                if self.on_console && console::shift_held(0) {
+                    Some(CtrlAction::ToggleSelect)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -444,6 +466,55 @@ impl App {
         if !text.is_empty() {
             self.clip.set(text);
         }
+    }
+
+    fn toggle_select_mode(&mut self) {
+        if self.keysel.is_some() {
+            self.keysel = None;
+            self.sel.clear();
+        } else {
+            self.enter_select_mode();
+        }
+    }
+
+    fn enter_select_mode(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let (r, c) = self.sessions[self.active].parser.screen().cursor_position();
+        let r = (r as usize).min(self.view_rows.saturating_sub(1)) as u16;
+        let c = (c as usize).min(self.view_cols.saturating_sub(1)) as u16;
+        self.sel.clear();
+        self.keysel = Some(KeySel { r, c, anchored: false });
+    }
+
+    fn keysel_move(&mut self, dr: i32, dc: i32) {
+        let Some(ks) = &mut self.keysel else { return };
+        let nr = (ks.r as i32 + dr).clamp(0, self.view_rows as i32 - 1) as u16;
+        let nc = (ks.c as i32 + dc).clamp(0, self.view_cols as i32 - 1) as u16;
+        ks.r = nr;
+        ks.c = nc;
+        if ks.anchored {
+            self.sel.drag(nr, nc);
+        }
+    }
+
+    fn keysel_confirm(&mut self) {
+        let Some(ks) = &mut self.keysel else { return };
+        if !ks.anchored {
+            ks.anchored = true;
+            let (r, c) = (ks.r, ks.c);
+            self.sel.press(r, c);
+        } else {
+            self.sel.release();
+            self.copy_selection();
+            self.keysel = None;
+        }
+    }
+
+    fn keysel_cancel(&mut self) {
+        self.keysel = None;
+        self.sel.clear();
     }
 
     fn paste(&mut self) {
@@ -533,7 +604,9 @@ impl App {
         self.layout = taskbar::draw(&mut self.canvas, &labels, self.active, &clock, batt);
         self.canvas.flush();
 
-        if !self.sessions.is_empty() {
+        if let Some(ks) = &self.keysel {
+            self.canvas.park_cursor(ks.r as usize, ks.c as usize, true);
+        } else if !self.sessions.is_empty() {
             let s = &self.sessions[self.active];
             if s.scroll > 0 {
                 self.canvas.park_cursor(0, 0, false);
@@ -556,6 +629,13 @@ enum CtrlAction {
     NewSession,
     CloseSession,
     Quit,
+    ToggleSelect,
+}
+
+struct KeySel {
+    r: u16,
+    c: u16,
+    anchored: bool,
 }
 
 #[allow(clippy::type_complexity)]

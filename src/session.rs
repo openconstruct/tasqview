@@ -3,7 +3,7 @@
 //! parsing even when unfocused; scrollback is provided natively by vt100.
 
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::AsRawFd;
 
 use nix::unistd::ForkResult;
 
@@ -41,17 +41,9 @@ impl Session {
 
         match unsafe { nix::unistd::fork() } {
             Ok(ForkResult::Child) => {
-                // Give the child a raw pty; interactive commands will flip
-                // their own termios later.
-                let slave_borrow = unsafe { BorrowedFd::borrow_raw(slave_fd) };
-                if let Ok(mut t) = nix::sys::termios::tcgetattr(slave_borrow) {
-                    nix::sys::termios::cfmakeraw(&mut t);
-                    let _ = nix::sys::termios::tcsetattr(
-                        slave_borrow,
-                        nix::sys::termios::SetArg::TCSANOW,
-                        &t,
-                    );
-                }
+                // Leave the slave's termios at its default (cooked, echo on).
+                // The shell/readline will switch modes itself as needed, same
+                // as a real terminal emulator.
                 let _ = nix::unistd::setsid();
                 unsafe {
                     libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0);
