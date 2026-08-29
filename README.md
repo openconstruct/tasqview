@@ -1,15 +1,19 @@
 # tview
 
 A Win95-style terminal multiplexer for the raw Linux console (VT). Written in
-Rust. No X, no Wayland - run it on a kernel VT (Ctrl+Alt+F1..F6).
+Rust. No X, no Wayland - run it on a kernel VT (Ctrl+Alt+F1..F6).  Made this for my 4g n3350 chromebook running Debian
+with no DE
+
+<img width="1280" height="599" alt="image" src="https://github.com/user-attachments/assets/444132a2-fe1d-4c48-9063-78be016d09d6" />
+
 
 ## Features
 
 - Full-screen terminal sessions on one canvas, with a Win95-style taskbar.
 - Sessions keep running in the background when unfocused.
 - Clickable taskbar tabs: focus on left click, red `x` closes. Works on a real
-  VT via a console mouse daemon (`consolation` or `gpm`).
-- Mouse drag selects text; `Alt+Shift+C` copies, `Alt+Shift+V` pastes, with a
+  VT via a console mouse daemon (`consolation` `gpm`, is buggy).
+- Mouse drag selects text; `Alt+C` copies, `Alt+V` pastes, with a
   toast confirmation.
 - **Start** button (bottom-left): launchers from a menu file / New tab / Exit.
 - 2000-line scrollback: `PgUp`/`PgDn` page, wheel scrolls 3 lines, `Esc` returns.
@@ -39,24 +43,6 @@ Note: the Linux kernel reports only mouse press/release positions on a VT (no
 motion), so selection appears on button-up; tview owns all mouse input and does
 not forward it to child programs.
 
-## Keys
-
-| Keys                        | Action                                |
-|-----------------------------|---------------------------------------|
-| `Ctrl+B` prefix             | `c` copy · `v` paste · `s` select · `t` new · `w` close · `x` quit · `n` next |
-| `Alt+Shift+T`               | new session                           |
-| `Alt+Tab`                   | switch session                        |
-| `Alt+Shift+C` / `Alt+Shift+V` | copy / paste                        |
-| `Alt+Shift+S`               | keyboard select (arrows extend, Enter copies, Space re-anchors, Esc cancels) |
-| `Alt+Shift+W` / `Alt+Shift+X` | close session / quit                 |
-| `PgUp` / `PgDn`, wheel      | scroll back / forward                 |
-| `Esc`                       | back to live view                     |
-| mouse                       | click tab to focus · drag to select · `x` closes |
-
-`Alt+<key>` and its `Alt+Shift+<key>` forms are both accepted, so a keymap that
-drops Shift still works (children lose `Alt+c/v/t/w/s`). `Ctrl+Shift+<key>` is a
-VT-only best-effort fallback; `Ctrl+C` and `Ctrl+V` always reach the child.
-
 ## Start menu
 
 The menu always lists launchers (from a text file, re-read on every open)
@@ -79,6 +65,3 @@ e: nvim /etc/fstab
   no API to write the selection buffer). Sessions are children of tview and die
   with it; exiting sends SIGHUP and restores the terminal.
 - `TVIEW_DEBUG=1` logs input decisions to `/tmp/tview-debug.log`.
-- Dev/testing works under a pty (`script`, tmux); only the shift-state
-  shortcuts and console mouse need a real VT. `Ctrl+B` chords are the canonical
-  shortcuts and work everywhere.
