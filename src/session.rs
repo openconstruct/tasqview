@@ -21,11 +21,31 @@ pub struct Session {
     /// when new output arrives while we are scrolled back.
     pub last_scroll_total: usize,
     pub alive: bool,
+    /// `comm` of the pty's current foreground process group (e.g. "bash",
+    /// "mc", "htop"), shown on the taskbar button. Empty until first poll.
+    pub fg_title: String,
+    last_title_poll: std::time::Instant,
 }
 
 impl Session {
     /// Spawn `shell` inside a fresh pty of `rows` x `cols`.
     pub fn spawn(id: usize, rows: u16, cols: u16, shell: &str) -> Option<Session> {
+        Self::spawn_inner(id, rows, cols, shell, None)
+    }
+
+    /// Spawn `shell -c <cmd>` inside a fresh pty; the tab closes when `cmd`
+    /// exits, same as a shell hitting EOF.
+    pub fn spawn_cmd(id: usize, rows: u16, cols: u16, shell: &str, cmd: &str) -> Option<Session> {
+        Self::spawn_inner(id, rows, cols, shell, Some(cmd))
+    }
+
+    fn spawn_inner(
+        id: usize,
+        rows: u16,
+        cols: u16,
+        shell: &str,
+        cmd: Option<&str>,
+    ) -> Option<Session> {
         let ws = nix::pty::Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -38,6 +58,12 @@ impl Session {
         let master_fd = master.as_raw_fd();
         let slave_fd = slave.as_raw_fd();
         let shell_c = CString::new(shell).ok()?;
+        // Build the exec args before the fork - no allocation in the child.
+        let dash_c = CString::new("-c").ok()?;
+        let cmd_c = match cmd {
+            Some(c) => Some(CString::new(c).ok()?),
+            None => None,
+        };
 
         match unsafe { nix::unistd::fork() } {
             Ok(ForkResult::Child) => {
@@ -55,11 +81,24 @@ impl Session {
                     }
                     libc::close(master_fd);
                     libc::setenv(b"TERM\0".as_ptr().cast(), b"xterm-256color\0".as_ptr().cast(), 1);
-                    libc::execl(
-                        shell_c.as_ptr(),
-                        shell_c.as_ptr(),
-                        std::ptr::null::<libc::c_char>(),
-                    );
+                    match &cmd_c {
+                        Some(c) => {
+                            libc::execl(
+                                shell_c.as_ptr(),
+                                shell_c.as_ptr(),
+                                dash_c.as_ptr(),
+                                c.as_ptr(),
+                                std::ptr::null::<libc::c_char>(),
+                            );
+                        }
+                        None => {
+                            libc::execl(
+                                shell_c.as_ptr(),
+                                shell_c.as_ptr(),
+                                std::ptr::null::<libc::c_char>(),
+                            );
+                        }
+                    }
                     libc::_exit(127);
                 }
             }
@@ -80,6 +119,9 @@ impl Session {
                     scroll: 0,
                     last_scroll_total: 0,
                     alive: true,
+                    fg_title: String::new(),
+                    last_title_poll: std::time::Instant::now()
+                        - std::time::Duration::from_secs(10),
                 })
             }
             Err(_) => None,
@@ -147,6 +189,35 @@ impl Session {
     pub fn signal(&self, sig: libc::c_int) {
         unsafe {
             libc::kill(self.pid.as_raw(), sig);
+        }
+    }
+
+    /// Label shown on this session's taskbar button: the foreground process
+    /// name if known, otherwise the numeric id.
+    pub fn title(&self) -> String {
+        if self.fg_title.is_empty() {
+            self.name.clone()
+        } else {
+            self.fg_title.clone()
+        }
+    }
+
+    /// Refresh `fg_title` from the pty's foreground process group. Throttled
+    /// to ~600ms; cheap (one ioctl + a small /proc read).
+    pub fn refresh_title(&mut self) {
+        if self.last_title_poll.elapsed() < std::time::Duration::from_millis(600) {
+            return;
+        }
+        self.last_title_poll = std::time::Instant::now();
+        let pgrp = unsafe { libc::tcgetpgrp(self.master) };
+        if pgrp <= 0 {
+            return;
+        }
+        if let Ok(s) = std::fs::read_to_string(format!("/proc/{pgrp}/comm")) {
+            let t = s.trim();
+            if !t.is_empty() {
+                self.fg_title = t.to_string();
+            }
         }
     }
 

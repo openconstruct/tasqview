@@ -128,12 +128,24 @@ impl Canvas {
         let mut outb: Vec<u8> = Vec::with_capacity(self.rows * self.cols * 4);
         let mut cur = (usize::MAX, usize::MAX);
         let mut cur_attrs = Cell::blank();
+        let mut opened = false;
 
         for r in 0..self.rows {
             let base = r * self.cols;
             let changed = self.prev[base..base + self.cols] != self.cells[base..base + self.cols];
             if !changed {
                 continue;
+            }
+            if !opened {
+                // The previous flush left the terminal's active SGR as whatever
+                // its last drawn cell was, and never reset it. Our per-cell diff
+                // below assumes the terminal starts this flush in the default
+                // style (cur_attrs == blank), so a run of default-styled cells
+                // emits no SGR at all - and would inherit the stale colour,
+                // painting "cleared" regions in the last app's background. Force
+                // a known-clean state before the first write.
+                outb.extend_from_slice(b"\x1b[0m");
+                opened = true;
             }
             if cur != (r, 0) {
                 let _ = write!(outb, "\x1b[{};1H", r + 1);
@@ -174,6 +186,12 @@ impl Canvas {
                 outb.extend_from_slice(ch.as_bytes());
                 cur.1 += 1;
             }
+        }
+
+        if opened {
+            // Leave the terminal in the default style so the parked cursor and
+            // anything drawn before the next flush start clean too.
+            outb.extend_from_slice(b"\x1b[0m");
         }
 
         let stdout = io::stdout();

@@ -1,91 +1,84 @@
 # tview
 
 A Win95-style terminal multiplexer for the raw Linux console (VT). Written in
-Rust. No X, no Wayland, no systemd-terminal-dependencies: run it on a kernel
-VT (Ctrl+Alt+F1..F6) at your own risk enjoyment.
+Rust. No X, no Wayland - run it on a kernel VT (Ctrl+Alt+F1..F6).
 
 ## Features
 
-- One full-screen terminal session per "window", drawn on a single canvas
-  with a 1-row Win95-style taskbar along the bottom.
+- Full-screen terminal sessions on one canvas, with a Win95-style taskbar.
 - Sessions keep running in the background when unfocused.
-- Clickable taskbar session buttons (left click focuses, click the red `X` to
-  close). Works on a real VT via gpm.
-- Mouse drag selects text; `Ctrl+Shift+C` copies, `Ctrl+Shift+V` pastes.
-- Native scrollback (2000 lines): `PgUp`/`PgDn` scroll a page, mouse wheel
-  scrolls 3 lines, `Esc` returns to the live view.
-- `Alt+Tab` cycles sessions.
-- System tray: clock + battery percentage (reads `/sys/class/power_supply/BAT*`).
-- Proper resize handling via `SIGWINCH` (SGR pixel mouse, bell, bracketed
-  paste, alternate screen are all handled through the vt100 emulator).
+- Clickable taskbar tabs: focus on left click, red `x` closes. Works on a real
+  VT via a console mouse daemon (`consolation` or `gpm`).
+- Mouse drag selects text; `Alt+Shift+C` copies, `Alt+Shift+V` pastes, with a
+  toast confirmation.
+- **Start** button (bottom-left): launchers from a menu file / New tab / Exit.
+- 2000-line scrollback: `PgUp`/`PgDn` page, wheel scrolls 3 lines, `Esc` returns.
+- `Alt+Tab` cycles sessions. Tray shows clock + battery.
+- Resize handled via SIGWINCH; SGR pixel mouse, bell, bracketed paste and the
+  alternate screen run through the vt100 emulator.
 
-## Building on Debian 13 (trixie)
-
-Debian 13 ships Rust 1.85, which is all you need:
+## Build
 
 ```sh
-sudo apt update
-sudo apt install rustc cargo libc-dev        # Rust toolchain
-sudo apt install gpm                         # console mouse daemon
-```
-
-Optional (smaller static binary):
-
-```sh
-sudo apt install musl-tools
-rustup toolchain install stable --profile minimal   # rustup for musl target
-rustup target add x86_64-unknown-linux-musl
-```
-
-Build:
-
-```sh
-cargo build --release
-# or static:
-# cargo build --release --target x86_64-unknown-linux-musl
-```
-
-Install:
-
-```sh
+cargo build --release            # static: --target x86_64-unknown-linux-musl
 sudo install -m 755 target/release/tview /usr/local/bin/tview
 ```
 
-## Running
+Needs `rustc`/`cargo`; for a real VT also enable a console mouse daemon:
+`sudo systemctl enable --now consolation` (or `gpm`).
 
-Run it only from a kernel console VT (not inside X, not over ssh):
+## Run
+
+Run only from a kernel console VT (not inside X, not over ssh):
 
 ```sh
-sudo systemctl enable --now gpm          # if not already running
-tview                                   # on a VT (Ctrl+Alt+F1..F6)
+tview
 ```
 
-Keymap cheat sheet:
+Note: the Linux kernel reports only mouse press/release positions on a VT (no
+motion), so selection appears on button-up; tview owns all mouse input and does
+not forward it to child programs.
 
-| Keys                     | Action                        |
-|--------------------------|-------------------------------|
-| `Ctrl+Shift+T`           | new session                   |
-| `Alt+Tab`                | switch session                |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste          |
-| `Ctrl+Shift+W`           | close session                 |
-| `Ctrl+Shift+X`           | quit                          |
-| `PgUp` / `PgDn`, wheel   | scroll back / forward         |
-| `Esc`                    | back to live view             |
-| mouse left-click / drag  | focus button / select text    |
+## Keys
 
-On a raw VT, `Ctrl+Shift+<key>` arrives as a plain control character; tview
-disambiguates it with the kernel's `TIOCLINUX` shift-state ioctl, so plain
-`Ctrl+C`, `Ctrl+V`, etc. still go straight to the focused program. If you run
-tview on a non-VT tty (e.g. inside tmux, for testing only), the shortcuts fall
-back gracefully: `Ctrl+C` copies when a selection exists, `Ctrl+V` pastes when
-the clipboard is non-empty, and otherwise keys are forwarded unmodified.
+| Keys                        | Action                                |
+|-----------------------------|---------------------------------------|
+| `Ctrl+B` prefix             | `c` copy · `v` paste · `s` select · `t` new · `w` close · `x` quit · `n` next |
+| `Alt+Shift+T`               | new session                           |
+| `Alt+Tab`                   | switch session                        |
+| `Alt+Shift+C` / `Alt+Shift+V` | copy / paste                        |
+| `Alt+Shift+S`               | keyboard select (arrows extend, Enter copies, Space re-anchors, Esc cancels) |
+| `Alt+Shift+W` / `Alt+Shift+X` | close session / quit                 |
+| `PgUp` / `PgDn`, wheel      | scroll back / forward                 |
+| `Esc`                       | back to live view                     |
+| mouse                       | click tab to focus · drag to select · `x` closes |
+
+`Alt+<key>` and its `Alt+Shift+<key>` forms are both accepted, so a keymap that
+drops Shift still works (children lose `Alt+c/v/t/w/s`). `Ctrl+Shift+<key>` is a
+VT-only best-effort fallback; `Ctrl+C` and `Ctrl+V` always reach the child.
+
+## Start menu
+
+The menu always lists launchers (from a text file, re-read on every open)
+followed by **New tab** and **Exit**. File lookup: `$TASQVIEW_MENU`, else
+`$XDG_CONFIG_HOME/tasqview/menu`, else `~/.config/tasqview/menu`.
+
+Format: `key: command` per line, one accelerator key (blank for none), run as
+`sh -c '<command>'` in a new tab:
+
+```
+h: htop
+m: mc
+e: nvim /etc/fstab
+# blank lines and lines starting with # are ignored
+```
 
 ## Notes
 
-- No images, no revivable detach. The clipboard is internal only: the Linux
-  console kernel exposes no API to write arbitrary text into its selection
-  buffer.
-- Sessions are children of tview and die with it. `Ctrl+Shift+X` (or closing
-  the last session) sends `SIGHUP` to every child and restores the terminal.
-- Dev/testing can be done under a pty (tmux/`script`); only the shift-state
-  shortcut detection and mouse-on-console paths genuinely need a real VT.
+- No detach/revive; the clipboard is internal only (the console kernel exposes
+  no API to write the selection buffer). Sessions are children of tview and die
+  with it; exiting sends SIGHUP and restores the terminal.
+- `TVIEW_DEBUG=1` logs input decisions to `/tmp/tview-debug.log`.
+- Dev/testing works under a pty (`script`, tmux); only the shift-state
+  shortcuts and console mouse need a real VT. `Ctrl+B` chords are the canonical
+  shortcuts and work everywhere.

@@ -139,6 +139,38 @@ impl Parser {
     /// Parse `ESC [ ... final`, returns (event, remaining buffer).
     fn parse_csi(&mut self) -> Option<(Event, Vec<u8>)> {
         let buf = &self.pending;
+        // Linux console function keys: F1-F5 arrive as ESC [ [ A .. ESC [ [ E.
+        // The generic final-byte scan below treats the second '[' as the final
+        // byte and drops the sequence, so pressing F1 on a raw VT just types
+        // a bare 'A'. Handle the form explicitly before the scanner sees it.
+        if buf.get(2) == Some(&b'[') {
+            match buf.get(3) {
+                None => return None, // sequence not fully arrived yet
+                Some(&c) if (b'A'..=b'E').contains(&c) => {
+                    let rest = buf[4..].to_vec();
+                    return Some((Event::F(1 + (c - b'A')), rest));
+                }
+                _ => {}
+            }
+        }
+        // Legacy mouse report: ESC [ M <btn> <col> <row> - three raw bytes,
+        // each offset by 32. gpm's xterm emulation and older terminals send
+        // this instead of SGR (ESC [ < ... M/m). Without handling it here the
+        // ESC[M is treated as a final byte and dropped, and the three data
+        // bytes leak to the child as garbage - which also trips the
+        // "a keystroke clears the pending selection" guard in on_event, so a
+        // mouse drag appears to deselect itself the moment you let go.
+        if buf.get(2) == Some(&b'M') {
+            if buf.len() < 6 {
+                return None; // data bytes not all here yet
+            }
+            let b = (buf[3] as i64) - 32;
+            let col = ((buf[4] as i64) - 33).max(0) as u16;
+            let row = ((buf[5] as i64) - 33).max(0) as u16;
+            let rest = buf[6..].to_vec();
+            return Some((classify_mouse(b, col, row, false), rest));
+        }
+
         // find final byte
         let mut idx = 2;
         while idx < buf.len() && buf[idx] >= 0x20 && buf[idx] < 0x40 {
@@ -232,24 +264,31 @@ fn parse_mouse(params: &[u8], finalb: u8) -> Option<Event> {
     let btn: i64 = it.next()?.parse().ok()?;
     let col: i64 = it.next()?.parse().ok()?;
     let row: i64 = it.next()?.parse().ok()?;
-    let (col, row) = (col.saturating_sub(1) as u16, row.saturating_sub(1) as u16);
+    let (col, row) = (col.saturating_sub(1).max(0) as u16, row.saturating_sub(1).max(0) as u16);
+    Some(classify_mouse(btn, col, row, finalb == b'm'))
+}
 
-    if btn == 64 || btn == 65 {
-        return Some(if btn == 64 {
+/// Turn a mouse button code into an event. `btn` is the xterm button field
+/// (SGR: the number before the final byte; legacy: the raw byte minus 32).
+/// `sgr_release` is set only on the SGR `m` final byte, where the button code
+/// no longer carries the "which button went up" bits.
+/// Encoding: bits 0-1 button, bit 5 (32) = motion (drag), bit 6 (64) = wheel;
+/// a button field with bits 0-1 == 3 also means release.
+fn classify_mouse(btn: i64, col: u16, row: u16, sgr_release: bool) -> Event {
+    if btn & 64 != 0 {
+        return if btn & 1 == 0 {
             Event::WheelUp { col, row }
         } else {
             Event::WheelDown { col, row }
-        });
+        };
     }
-    // SGR button encode: bits 0-1 button, bit 5 (32) = motion (drag),
-    // bit 6 (64) = wheel. A final 'm' always means button-up.
-    if finalb == b'm' || btn & 3 == 3 {
-        return Some(Event::MouseRelease { col, row });
+    if sgr_release || btn & 3 == 3 {
+        return Event::MouseRelease { col, row };
     }
     if btn & 32 != 0 {
-        return Some(Event::MouseDrag { col, row });
+        return Event::MouseDrag { col, row };
     }
-    Some(Event::MousePress { col, row })
+    Event::MousePress { col, row }
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -261,5 +300,118 @@ fn utf8_len(b: u8) -> usize {
         3
     } else {
         2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drain_all(bytes: &[u8]) -> Vec<Event> {
+        let mut p = Parser::new();
+        p.push(bytes);
+        p.drain()
+    }
+
+    #[test]
+    fn linux_console_function_keys() {
+        assert_eq!(drain_all(b"\x1b[[A"), vec![Event::F(1)]);
+        assert_eq!(drain_all(b"\x1b[[B"), vec![Event::F(2)]);
+        assert_eq!(drain_all(b"\x1b[[C"), vec![Event::F(3)]);
+        assert_eq!(drain_all(b"\x1b[[D"), vec![Event::F(4)]);
+        assert_eq!(drain_all(b"\x1b[[E"), vec![Event::F(5)]);
+    }
+
+    #[test]
+    fn ss3_and_csi_function_keys_still_work() {
+        assert_eq!(drain_all(b"\x1bOP"), vec![Event::F(1)]);
+        assert_eq!(drain_all(b"\x1bOS"), vec![Event::F(4)]);
+        assert_eq!(drain_all(b"\x1b[15~"), vec![Event::F(5)]);
+        assert_eq!(drain_all(b"\x1b[24~"), vec![Event::F(12)]);
+    }
+
+    #[test]
+    fn console_fkey_then_trailing_byte() {
+        assert_eq!(drain_all(b"\x1b[[Ax"), vec![Event::F(1), Event::Byte(b'x')]);
+    }
+
+    #[test]
+    fn legacy_mouse_press_drag_release() {
+        // ESC [ M  btn=' '(0)+32  col='!'(1)+32  row='!'(1)+32  -> press at 0,0
+        assert_eq!(
+            drain_all(b"\x1b[M \x21\x21"),
+            vec![Event::MousePress { col: 0, row: 0 }]
+        );
+        // btn = 32 (motion) + 0 -> drag
+        assert_eq!(
+            drain_all(b"\x1b[M\x40\x30\x25"),
+            vec![Event::MouseDrag { col: 15, row: 4 }]
+        );
+        // btn low bits 3 -> release
+        assert_eq!(
+            drain_all(b"\x1b[M\x23\x30\x25"),
+            vec![Event::MouseRelease { col: 15, row: 4 }]
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_wheel() {
+        // btn = 64 + 32 (offset) = 96 = '`'
+        assert_eq!(
+            drain_all(b"\x1b[M\x60\x21\x21"),
+            vec![Event::WheelUp { col: 0, row: 0 }]
+        );
+        assert_eq!(
+            drain_all(b"\x1b[M\x61\x21\x21"),
+            vec![Event::WheelDown { col: 0, row: 0 }]
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_no_leak_to_child() {
+        // The three data bytes must be consumed, not forwarded as Byte events.
+        let evs = drain_all(b"\x1b[M \x21\x21x");
+        assert_eq!(
+            evs,
+            vec![Event::MousePress { col: 0, row: 0 }, Event::Byte(b'x')]
+        );
+    }
+
+    #[test]
+    fn partial_legacy_mouse_waits() {
+        let mut p = Parser::new();
+        p.push(b"\x1b[M \x21");
+        assert_eq!(p.drain(), vec![]);
+        p.push(b"\x21");
+        assert_eq!(p.drain(), vec![Event::MousePress { col: 0, row: 0 }]);
+    }
+
+    #[test]
+    fn sgr_mouse_still_works() {
+        assert_eq!(
+            drain_all(b"\x1b[<0;12;5M"),
+            vec![Event::MousePress { col: 11, row: 4 }]
+        );
+        assert_eq!(
+            drain_all(b"\x1b[<0;12;5m"),
+            vec![Event::MouseRelease { col: 11, row: 4 }]
+        );
+        assert_eq!(
+            drain_all(b"\x1b[<32;12;5M"),
+            vec![Event::MouseDrag { col: 11, row: 4 }]
+        );
+        assert_eq!(
+            drain_all(b"\x1b[<64;1;1M"),
+            vec![Event::WheelUp { col: 0, row: 0 }]
+        );
+    }
+
+    #[test]
+    fn partial_console_fkey_waits() {
+        let mut p = Parser::new();
+        p.push(b"\x1b[[");
+        assert_eq!(p.drain(), vec![]);
+        p.push(b"C");
+        assert_eq!(p.drain(), vec![Event::F(3)]);
     }
 }

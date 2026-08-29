@@ -1,0 +1,16 @@
+# tview Start-menu launchers.
+# Copy to ~/.config/tasqview/menu (or point $TASQVIEW_MENU at this file).
+#
+# Format: key: command
+#   - text before the first ':' is an accelerator key, typed while the menu
+#     is open. Leave it blank for no key.
+#   - the command runs as `sh -c '<command>'` in a new tab, which closes
+#     when the command exits.
+#   - blank lines and lines starting with '#' are ignored.
+
+h: htop
+m: mc
+t: btop
+r: ranger
+p: python3
+l: journalctl -f
